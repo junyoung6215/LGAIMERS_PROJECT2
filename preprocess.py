@@ -1,3 +1,4 @@
+"""
 import pandas as pd
 import numpy as np
 
@@ -87,3 +88,4 @@ def preprocess_data(input_file, output_file):
 
 if __name__ == "__main__":
     preprocess_data('train.csv', 'preprocessed_data.csv')
+"""
