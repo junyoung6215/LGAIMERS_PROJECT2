@@ -20,7 +20,7 @@ wheels/
 *.egg-info/
 .installed.cfg
 *.egg
-
+*.vscode
 # Virtual Environment
 LGAIMERS_PROJECT2/
 venv/
