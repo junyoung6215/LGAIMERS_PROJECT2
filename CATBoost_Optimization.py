@@ -48,7 +48,7 @@ def objective(trial):
     
     # CatBoost 모델 학습 시작
     print(f">> [CATBoost] Trial {trial.number} - 모델 학습 시작")
-    model = CatBoostClassifier(cat_features=cat_features, **param, eval_metric="Logloss", verbose=False)
+    model = CatBoostClassifier(cat_features=cat_features, **param, eval_metric="Logloss", silent=True)#silent=True  # 메시지 출력 OFF/verbose=False/ 메세지 출력 ON
     model.fit(X_train, y_train)
     
     # 테스트 데이터 예측 후 ROC-AUC 평가
@@ -59,8 +59,11 @@ def objective(trial):
     return auc
 
 print("Step 2: Optuna를 통한 하이퍼파라미터 최적화 시작")
-study = optuna.create_study(direction="maximize")
-study.optimize(objective, n_trials=5)
+study = optuna.create_study(
+    direction="maximize",
+    pruner=optuna.pruners.MedianPruner(n_warmup_steps=10) #pruner추가
+)
+study.optimize(objective, n_trials=10)
 print(">> [CATBoost] 최적화 완료")
 print("최적의 ROC-AUC:", study.best_value)
 print("최적의 파라미터:", study.best_params)
