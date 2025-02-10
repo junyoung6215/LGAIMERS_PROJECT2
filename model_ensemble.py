@@ -1,6 +1,6 @@
 import numpy as np
 import pandas as pd
-from sklearn.model_selection import train_test_split
+from sklearn.model_selection import train_test_split, StratifiedKFold
 from sklearn.ensemble import StackingClassifier
 import xgboost as xgb
 import lightgbm as lgb
@@ -94,7 +94,7 @@ def optimize_blend_ratios(models, x_val, y_val):
         
         preds = {}
         for name, model in models.items():
-            preds[name] = model.predict_proba(x_val)[:,1]
+            preds[name] = model.predict_proba(x_val)[:, 1]
             gc.collect()
         
         final_pred = sum(weights[name] * pred for name, pred in preds.items())
@@ -119,11 +119,94 @@ def optimize_blend_ratios(models, x_val, y_val):
     
     return best_weights
 
+def optimize_blend_ratios_kfold(models, X, y, n_splits=5):
+    """K-Fold 기반 블렌딩 가중치 최적화"""
+    print("\n🔄 K-Fold 기반 블렌딩 가중치 최적화 시작")
+    print(f"  • 데이터 크기: {len(X)} 샘플")
+    print(f"  • Fold 수: {n_splits}")
+    print(f"  • 모델 개수: {len(models)} (XGBoost, LightGBM, CatBoost)")
+    
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    
+    def objective(trial):
+        trial_num = trial.number + 1
+        print(f"\n📊 Trial {trial_num} 시작")
+        
+        weights = {
+            'xgboost': trial.suggest_float('xgboost', 0.0, 1.0),
+            'lightgbm': trial.suggest_float('lightgbm', 0.0, 1.0),
+            'catboost': trial.suggest_float('catboost', 0.0, 1.0)
+        }
+        
+        total = sum(weights.values())
+        weights = {k: v/total for k, v in weights.items()}
+        
+        print("  📈 현재 시도 중인 가중치:")
+        for model_name, weight in weights.items():
+            print(f"    • {model_name}: {weight:.4f} ({weight*100:.1f}%)")
+        
+        # 각 trial마다 oof 예측값 배열 초기화
+        trial_oof_preds = np.zeros(len(y))
+        fold_scores = []
+        for fold, (train_idx, val_idx) in enumerate(skf.split(X, y), 1):
+            print(f"\n  🔄 Fold {fold}/{n_splits} 진행 중")
+            X_train_fold, X_val_fold = X.iloc[train_idx], X.iloc[val_idx]
+            y_train_fold, y_val_fold = y.iloc[train_idx], y.iloc[val_idx]
+            
+            print(f"    • 학습 데이터: {len(X_train_fold)} 샘플")
+            print(f"    • 검증 데이터: {len(X_val_fold)} 샘플")
+
+            preds = {}
+            for name, model in models.items():
+                print(f"    🔧 {name} 모델 학습 중...")
+                
+                # 모델별로 적절한 fit() 파라미터 사용
+                if name == "xgboost":
+                    model.fit(X_train_fold, y_train_fold, verbose=False)
+                elif name == "lightgbm":
+                    # LightGBM은 verbose 인자를 생략하여 기본 로그 설정 사용
+                    model.fit(X_train_fold, y_train_fold)
+                elif name == "catboost":
+                    model.fit(X_train_fold, y_train_fold, silent=True)
+                
+                preds[name] = model.predict_proba(X_val_fold)[:, 1]
+                fold_score = roc_auc_score(y_val_fold, preds[name])
+                print(f"      ↳ {name} Fold {fold} ROC-AUC: {fold_score:.4f}")
+            
+            fold_blend = sum(weights[name] * pred for name, pred in preds.items())
+            trial_oof_preds[val_idx] = fold_blend
+            
+            fold_blend_score = roc_auc_score(y_val_fold, fold_blend)
+            fold_scores.append(fold_blend_score)
+            print(f"    ✨ Fold {fold} 블렌딩 ROC-AUC: {fold_blend_score:.4f}")
+        
+        final_auc = roc_auc_score(y, trial_oof_preds)
+        print(f"\n  📊 Trial {trial_num} 결과:")
+        print(f"    • 평균 Fold ROC-AUC: {np.mean(fold_scores):.4f}")
+        print(f"    • 전체 ROC-AUC: {final_auc:.4f}")
+        print(f"    • Fold 점수 편차: {np.std(fold_scores):.4f}")
+        
+        return final_auc
+
+    # Optuna로 최적 가중치 찾기
+    print("\n🔍 Optuna 최적화 시작")
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=30)
+    
+    best_weights = {k: v/sum(study.best_params.values()) for k, v in study.best_params.items()}
+    
+    print("\n🏆 최종 최적 블렌딩 가중치:")
+    for model, weight in best_weights.items():
+        print(f"  • {model}: {weight:.4f} ({weight*100:.1f}%)")
+    print(f"  • 최종 ROC-AUC: {study.best_value:.4f}")
+    
+    return best_weights
+
 def weighted_blend_predict(models, x_test, weights):
     """가중치 기반 예측"""
     preds = {}
     for name, model in models.items():
-        preds[name] = model.predict_proba(x_test)[:,1]
+        preds[name] = model.predict_proba(x_test)[:, 1]
         gc.collect()
     
     # weights 키가 "w_xgboost" 또는 "xgboost" 형식 둘 다 처리할 수 있도록 변경
@@ -132,8 +215,8 @@ def weighted_blend_predict(models, x_test, weights):
     return final_pred
 
 def run_blending_pipeline(X_train, y_train, X_test, test_ids, force_retrain=False):
-    """블렌딩 전용 파이프라인"""
-    print("\n=== 블렌딩 파이프라인 시작 ===")
+    """K-Fold 기반 블렌딩 파이프라인"""
+    print("\n=== 📋 블렌딩 파이프라인 시작 ===")
     
     # 검증 세트 분리
     X_train_main, X_val, y_train_main, y_val = train_test_split(
@@ -152,25 +235,28 @@ def run_blending_pipeline(X_train, y_train, X_test, test_ids, force_retrain=Fals
     print("\n=== 개별 모델 성능 ===")
     scores = {}
     for name, model in models.items():
-        pred = model.predict_proba(X_val)[:,1]
+        pred = model.predict_proba(X_val)[:, 1]
         score = roc_auc_score(y_val, pred)
         scores[name] = score
         print(f"{name} ROC-AUC: {score:.4f}")
     
-    # 블렌딩 가중치 최적화
+    # 블렌딩 가중치 최적화: 항상 최적화를 실행하도록 수정
     weights_path = f"{MODEL_PATH}/blend_weights.pkl"
-    if os.path.exists(weights_path) and not force_retrain:
-        best_weights = joblib.load(weights_path)
-        print("\n기존 블렌딩 가중치를 로드했습니다.")
-    else:
-        best_weights = optimize_blend_ratios(models, X_val, y_val)
-        joblib.dump(best_weights, weights_path)
+    best_weights = optimize_blend_ratios_kfold(models, X_train, y_train, n_splits=5)
+    joblib.dump(best_weights, weights_path)
+    
+    # 블렌딩 예측 및 ROC-AUC 계산
+    final_pred = weighted_blend_predict(models, X_val, best_weights)
+    blend_roc_auc = roc_auc_score(y_val, final_pred)
+    scores["ensemble_blend"] = blend_roc_auc
+    
+    print(f"\n=== 앙상블 블렌딩 모델 ROC-AUC: {blend_roc_auc:.4f} ===")
     
     # 최종 예측 및 CSV 저장
-    final_pred = weighted_blend_predict(models, X_test, best_weights)
+    final_test_pred = weighted_blend_predict(models, X_test, best_weights)
     submission = pd.DataFrame({
         "ID": test_ids,
-        "probability": final_pred
+        "probability": final_test_pred
     })
     
     submission.to_csv("blend_prediction.csv", index=False)

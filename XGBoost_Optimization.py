@@ -8,10 +8,9 @@ import optuna
 import joblib
 import os
 
-# Step 1: 데이터 로드 및 분할 (타겟: "임신 성공 여부")
+# Step 1: 데이터 로드 및 전처리
 print("Step 1: 데이터 로드 및 분할 시작")
 data = pd.read_csv("train.csv")
-print("  [데이터 로드 완료] train.csv 파일을 성공적으로 읽어왔습니다.")
 X = data.drop(columns=["임신 성공 여부"])
 y = data["임신 성공 여부"]
 
@@ -43,33 +42,28 @@ print(f"  [클래스 비율] 음성:{neg_count}, 양성:{pos_count}, 기본 scal
 
 def objective(trial):
     print(f">> [XGBoost] Trial {trial.number} 시작")
-    # XGBoost 하이퍼파라미터 탐색 범위 설정
     param = {
         "objective": "binary:logistic",
         "eval_metric": "auc",
         "booster": "gbtree",
-        "max_depth": trial.suggest_int("max_depth", 3, 12),
-        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-        "n_estimators": trial.suggest_int("n_estimators", 100, 1000, step=50),
-        "min_child_weight": trial.suggest_int("min_child_weight", 1, 7),
-        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-        "scale_pos_weight": trial.suggest_float("scale_pos_weight", 0.5, 2.0, step=0.1),
+        "max_depth": trial.suggest_int("max_depth", 4, 10),
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+        "n_estimators": trial.suggest_int("n_estimators", 200, 800, step=50),
+        "min_child_weight": trial.suggest_int("min_child_weight", 3, 10),
+        "subsample": trial.suggest_float("subsample", 0.7, 0.9),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.7, 0.9),
+        "scale_pos_weight": trial.suggest_float("scale_pos_weight", 0.5, 2.0, step=0.05),
+        "gamma": trial.suggest_float("gamma", 0.0, 5.0),
+        "lambda": trial.suggest_float("lambda", 1e-8, 10.0, log=True),
+        "alpha": trial.suggest_float("alpha", 1e-8, 10.0, log=True),
         "random_state": 42
     }
     print(f"[Optuna] Trial {trial.number} 설정된 파라미터: {param}")
     
-    # XGBoost 모델 학습 - early_stopping_rounds 제거
-    print(f">> [XGBoost] Trial {trial.number} - 모델 학습 시작")
+    # early_stopping_rounds 제거하여 fit 수행
     model = xgb.XGBClassifier(**param)
-    model.fit(
-        X_train, y_train,
-        eval_set=[(X_test, y_test)],
-        verbose=False
-    )
+    model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
     
-    # 테스트 데이터 예측 및 평가
-    print(f">> [XGBoost] Trial {trial.number} - 예측 및 평가 진행")
     y_prob = model.predict_proba(X_test)[:, 1]
     auc = roc_auc_score(y_test, y_prob)
     print(f"[Optuna] Trial {trial.number} 완료: ROC-AUC = {auc}\n")
@@ -77,7 +71,7 @@ def objective(trial):
 
 print("Step 2: Optuna를 통한 하이퍼파라미터 최적화 시작")
 study = optuna.create_study(direction="maximize")
-study.optimize(objective, n_trials=5)
+study.optimize(objective, n_trials=100)
 print(">> [XGBoost] 최적화 완료")
 print("최적의 ROC-AUC:", study.best_value)
 print("최적의 파라미터:", study.best_params)

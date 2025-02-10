@@ -5,6 +5,7 @@ from sklearn.model_selection import train_test_split
 from sklearn.metrics import roc_auc_score
 import optuna
 import joblib
+import os
 
 # Step 1: 데이터 로드 및 분할 (타겟: "임신 성공 여부")
 print("Step 1: 데이터 로드 및 분할 시작")
@@ -41,18 +42,20 @@ def objective(trial):
         "objective": "binary",
         "metric": "auc",
         "boosting_type": "gbdt",
-        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.3, log=True),
-        "num_leaves": trial.suggest_int("num_leaves", 20, 150),
-        "max_depth": trial.suggest_int("max_depth", 3, 15),
-        "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 20, 100),
-        "lambda_l1": trial.suggest_float("lambda_l1", 1e-8, 10.0, log=True),
-        "lambda_l2": trial.suggest_float("lambda_l2", 1e-8, 10.0, log=True),
-        "feature_fraction": trial.suggest_float("feature_fraction", 0.4, 1.0),
-        "bagging_fraction": trial.suggest_float("bagging_fraction", 0.4, 1.0),
+        "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
+        "num_leaves": trial.suggest_int("num_leaves", 20, 300),
+        "max_depth": trial.suggest_int("max_depth", 3, 30),
+        "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 10, 200),
+        "lambda_l1": trial.suggest_float("lambda_l1", 1e-8, 20.0, log=True),
+        "lambda_l2": trial.suggest_float("lambda_l2", 1e-8, 20.0, log=True),
+        "feature_fraction": trial.suggest_float("feature_fraction", 0.5, 1.0),
+        "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
         "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
-        "scale_pos_weight": trial.suggest_float("scale_pos_weight", 0.5, 2.0, step=0.1)
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
+        "scale_pos_weight": trial.suggest_float("scale_pos_weight", 0.5, 5.0, step=0.1),
+        "min_gain_to_split": trial.suggest_float("min_gain_to_split", 0.0, 0.2)
     }
-    num_boost_round = trial.suggest_int("num_boost_round", 100, 1000, step=50)
+    num_boost_round = trial.suggest_int("num_boost_round", 500, 2000, step=100)
     print(f"[Optuna] Trial {trial.number} 설정된 파라미터: {param}, num_boost_round = {num_boost_round}")
 
     print(f">> [LightGBM] Trial {trial.number} - 모델 학습 시작")
@@ -81,13 +84,12 @@ def objective(trial):
 
 print("Step 2: Optuna를 통한 하이퍼파라미터 최적화 시작")
 study = optuna.create_study(direction="maximize")
-study.optimize(objective, n_trials=5)
+study.optimize(objective, n_trials=50)
 print(">> [LightGBM] 최적화 완료")
 print("최적의 ROC-AUC:", study.best_value)
 print("최적의 파라미터:", study.best_params)
 
 # 'open' 디렉토리 존재 확인 및 생성
-import os
 if not os.path.exists('open'):
     os.makedirs('open')
     print(">> [LightGBM] 'open' 디렉토리 생성됨")

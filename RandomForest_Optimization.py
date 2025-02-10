@@ -74,7 +74,7 @@ def objective(trial):
 
 print("Step 2: Optuna를 통한 하이퍼파라미터 최적화 시작")
 study = optuna.create_study(direction="maximize")
-study.optimize(objective, n_trials=5)
+study.optimize(objective, n_trials=100)
 print(">> [RandomForest] 최적화 완료")
 print("최적의 ROC-AUC:", study.best_value)
 print("최적의 파라미터:", study.best_params)
