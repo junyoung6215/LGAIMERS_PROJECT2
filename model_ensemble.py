@@ -49,33 +49,23 @@ def load_and_merge_params():
         return None
 
 def load_or_train_models(x_train, y_train, best_params, force_retrain=False):
-    """모델 로드 또는 학습"""
     models = {
         "xgboost": xgb.XGBClassifier(**best_params["xgb"], use_label_encoder=False),
         "lightgbm": lgb.LGBMClassifier(**best_params["lgb"]),
         "catboost": CatBoostClassifier(**best_params["cat"], verbose=False)
     }
     
-    if not force_retrain:
-        try:
-            for name in models.keys():
-                model_path = f"{MODEL_PATH}/{name}_model.pkl"
-                if os.path.exists(model_path):
-                    models[name] = joblib.load(model_path)
-                    print(f"{name} 모델을 로드했습니다.")
-                else:
-                    raise FileNotFoundError
-            return models
-        except:
-            print("저장된 모델을 찾을 수 없어 새로 학습합니다.")
-    
-    print("\n=== 개별 모델 학습 시작 ===")
     for name, model in models.items():
-        print(f"\n{name} 모델 학습 중...")
-        model.fit(x_train, y_train)
-        joblib.dump(model, f"{MODEL_PATH}/{name}_model.pkl")
-        gc.collect()
-        print(f"{name} 모델 학습 및 저장 완료")
+        model_path = f"{MODEL_PATH}/{name}_model.pkl"
+        
+        if os.path.exists(model_path) and not force_retrain:
+            print(f"{name} 모델 불러오는 중...")
+            models[name] = joblib.load(model_path)
+        else:
+            print(f"{name} 모델 학습 중...")
+            model.fit(x_train, y_train)
+            joblib.dump(model, model_path)
+            print(f"{name} 모델 학습 및 저장 완료")
     
     return models
 
