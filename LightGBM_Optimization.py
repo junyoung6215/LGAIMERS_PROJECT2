@@ -1,3 +1,5 @@
+print(">> [LightGBM_Optimization] 파일 실행 시작")  # 파일 실행 로그
+
 import pandas as pd
 import numpy as np
 import lightgbm as lgb
@@ -11,6 +13,8 @@ import os
 print("Step 1: 데이터 로드 및 분할 시작")
 # train.csv 파일을 읽어오고, 타겟 '임신 성공 여부'와 특징 데이터를 분리합니다.
 data = pd.read_csv("train.csv")
+if "ID" in data.columns:
+    data = data.drop(columns=["ID"])
 print("  [데이터 로드 완료] train.csv 파일 읽기 성공")
 X = data.drop(columns=["임신 성공 여부"])
 y = data["임신 성공 여부"]
@@ -62,10 +66,10 @@ def objective(trial):
     lgb_train = lgb.Dataset(X_train, label=y_train, categorical_feature=string_columns)
     lgb_eval = lgb.Dataset(X_test, label=y_test, categorical_feature=string_columns, reference=lgb_train)
     
-    # Use callback functions for early stopping and logging control
+    # Callback 함수로 early stopping 사용, verbose_eval 제거
     callbacks = [
         lgb.early_stopping(stopping_rounds=50, verbose=False),
-        lgb.log_evaluation(period=0)  # Suppress training log output
+        lgb.log_evaluation(period=0)  # 로그 출력 억제
     ]
     
     gbm = lgb.train(
@@ -89,12 +93,63 @@ print(">> [LightGBM] 최적화 완료")
 print("최적의 ROC-AUC:", study.best_value)
 print("최적의 파라미터:", study.best_params)
 
+from sklearn.model_selection import StratifiedKFold
+import numpy as np
+from sklearn.metrics import roc_auc_score
+
+def evaluate_ensemble_roc_kfold(X, y, model_params, n_splits=5):
+    print(">> [LightGBM] K-Fold 앙상블 평가 함수 실행")
+    from sklearn.model_selection import StratifiedKFold
+    skf = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=42)
+    oof_preds = np.zeros(len(y))
+    auc_scores = []
+    for fold, (train_idx, val_idx) in enumerate(skf.split(X, y)):
+        print(f"  [Fold {fold+1}/{n_splits}] 훈련 시작")
+        X_train_fold, X_val_fold = X.iloc[train_idx], X.iloc[val_idx]
+        y_train_fold, y_val_fold = y.iloc[train_idx], y.iloc[val_idx]
+        
+        train_data = lgb.Dataset(X_train_fold, label=y_train_fold)
+        val_data = lgb.Dataset(X_val_fold, label=y_val_fold, reference=train_data)
+        
+        # 모델 학습 (verbose_eval 제거)
+        model = lgb.train(model_params,
+                          train_data,
+                          valid_sets=[val_data])
+        print(f"  [Fold {fold+1}] 모델 학습 완료")
+        
+        # 예측 및 ROC-AUC 계산
+        y_pred = model.predict(X_val_fold)
+        oof_preds[val_idx] = y_pred
+        fold_auc = roc_auc_score(y_val_fold, y_pred)
+        auc_scores.append(fold_auc)
+        print(f"  [Fold {fold+1}] ROC-AUC: {fold_auc:.4f}")
+        
+    final_auc = roc_auc_score(y, oof_preds)
+    print(f">> [LightGBM] 최종 ROC-AUC: {final_auc:.4f}")
+    print(f">> [LightGBM] 평균 Fold ROC-AUC: {np.mean(auc_scores):.4f}, 표준편차: {np.std(auc_scores):.4f}")
+    return final_auc, oof_preds, auc_scores
+
+# 앙상블 평가 코드 추가
+print("\n>> [LightGBM] K-Fold 기반 앙상블 성능 평가")
+ensemble_auc, oof_predictions, fold_scores = evaluate_ensemble_roc_kfold(X, y, study.best_params, n_splits=5)
+
+print("\n=== 최종 성능 비교 ===")
+print(f"단일 모델 ROC-AUC: {study.best_value:.4f}")
+print(f"K-Fold 앙상블 ROC-AUC: {ensemble_auc:.4f}")
+print(f"성능 차이: {(ensemble_auc - study.best_value):.4f}")
+
 # 'open' 디렉토리 존재 확인 및 생성
 if not os.path.exists('open'):
     os.makedirs('open')
     print(">> [LightGBM] 'open' 디렉토리 생성됨")
 
 # 최적 파라미터 저장 (LightGBM 전용 파일명으로 수정)
-best_params_path = "open/best_lgbm_params.pkl"
+best_params_path = "open/best_lightgbm_params.pkl"
 joblib.dump(study.best_params, best_params_path)
 print(f">> [LightGBM] 최적 파라미터 저장 완료: {os.path.abspath(best_params_path)}")
+
+# OOF 예측값 저장
+oof_df = pd.DataFrame({'true_values': y, 'oof_predictions': oof_predictions})
+oof_df.to_csv('open/lightgbm_oof_predictions.csv', index=False)
+print(">> [LightGBM] OOF 예측값 저장 완료")
+print(">> [LightGBM_Optimization] 파일 실행 종료")

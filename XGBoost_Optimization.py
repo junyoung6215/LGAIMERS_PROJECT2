@@ -8,9 +8,28 @@ import optuna
 import joblib
 import os
 
-# Step 1: 데이터 로드 및 전처리
+def update_best_parameters(file_path, new_score, new_params):
+    if os.path.exists(file_path):
+        old = joblib.load(file_path)
+        old_score = old.get("score", 0)
+        if new_score > old_score:
+            best = {"score": new_score, "params": new_params}
+            joblib.dump(best, file_path)
+            print("새로운 최적 파라미터 업데이트 완료: score = {:.4f}".format(new_score))
+        else:
+            print("기존 최적 파라미터 유지: score = {:.4f}".format(old_score))
+            best = old
+    else:
+        best = {"score": new_score, "params": new_params}
+        joblib.dump(best, file_path)
+        print("최적 파라미터 저장 완료: score = {:.4f}".format(new_score))
+    return best
+
+# Step 1: 데이터 로드 및 분할 시작
 print("Step 1: 데이터 로드 및 분할 시작")
 data = pd.read_csv("train.csv")
+if "ID" in data.columns:
+    data = data.drop(columns=["ID"])
 X = data.drop(columns=["임신 성공 여부"])
 y = data["임신 성공 여부"]
 
@@ -60,8 +79,7 @@ def objective(trial):
     }
     print(f"[Optuna] Trial {trial.number} 설정된 파라미터: {param}")
     
-    # early_stopping_rounds 제거하여 fit 수행
-    model = xgb.XGBClassifier(**param)
+    model = xgb.XGBClassifier(**param, use_label_encoder=False)
     model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
     
     y_prob = model.predict_proba(X_test)[:, 1]
@@ -76,12 +94,10 @@ print(">> [XGBoost] 최적화 완료")
 print("최적의 ROC-AUC:", study.best_value)
 print("최적의 파라미터:", study.best_params)
 
-# 'open' 디렉토리 존재 확인 및 생성
 if not os.path.exists('open'):
     os.makedirs('open')
     print(">> [XGBoost] 'open' 디렉토리 생성됨")
 
-# 최적 파라미터 저장
 best_params_path = "open/best_xgb_params.pkl"
-joblib.dump(study.best_params, best_params_path)
-print(f">> [XGBoost] 최적 파라미터 저장 완료: {os.path.abspath(best_params_path)}")
+update_best_parameters(best_params_path, study.best_value, study.best_params)
+print("Step 3: 최적 파라미터 저장 완료")
