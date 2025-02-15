@@ -41,25 +41,31 @@ print(f"  [클래스 비율] 음성:{neg_count}, 양성:{pos_count}, 기본 scal
 
 def objective(trial):
     print(f">> [LightGBM] Trial {trial.number} 시작")
-    # LightGBM의 하이퍼파라미터 탐색 범위 설정
+    # boosting_type을 gbdt 또는 dart로 선택하여, dart 선택 시 drop_rate도 튜닝
+    boost_type = trial.suggest_categorical("boosting_type", ["gbdt", "dart"])
     param = {
         "objective": "binary",
         "metric": "auc",
-        "boosting_type": "gbdt",
+        "boosting_type": boost_type,
         "learning_rate": trial.suggest_float("learning_rate", 0.005, 0.3, log=True),
-        "num_leaves": trial.suggest_int("num_leaves", 20, 300),
-        "max_depth": trial.suggest_int("max_depth", 3, 30),
+        "num_leaves": trial.suggest_int("num_leaves", 30, 200),  # 범위 세분화
+        "max_depth": trial.suggest_int("max_depth", 3, 15),        # 데이터셋에 맞게 범위 조정
         "min_data_in_leaf": trial.suggest_int("min_data_in_leaf", 10, 200),
+        "min_data_in_bin": trial.suggest_int("min_data_in_bin", 3, 100),
+        "max_bin": trial.suggest_int("max_bin", 100, 300),
         "lambda_l1": trial.suggest_float("lambda_l1", 1e-8, 20.0, log=True),
         "lambda_l2": trial.suggest_float("lambda_l2", 1e-8, 20.0, log=True),
         "feature_fraction": trial.suggest_float("feature_fraction", 0.5, 1.0),
         "bagging_fraction": trial.suggest_float("bagging_fraction", 0.5, 1.0),
         "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0),
-        "scale_pos_weight": trial.suggest_float("scale_pos_weight", 0.5, 5.0, step=0.1),
-        "min_gain_to_split": trial.suggest_float("min_gain_to_split", 0.0, 0.2)
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0)
     }
-    num_boost_round = trial.suggest_int("num_boost_round", 500, 2000, step=100)
+    # dart 전용 drop_rate 추가
+    if boost_type == "dart":
+        param["drop_rate"] = trial.suggest_float("drop_rate", 0.1, 0.5)
+    
+    # 기존보다 세밀한 num_boost_round 범위 적용
+    num_boost_round = trial.suggest_int("num_boost_round", 500, 2000, step=50)
     print(f"[Optuna] Trial {trial.number} 설정된 파라미터: {param}, num_boost_round = {num_boost_round}")
 
     print(f">> [LightGBM] Trial {trial.number} - 모델 학습 시작")
@@ -88,7 +94,7 @@ def objective(trial):
 
 print("Step 2: Optuna를 통한 하이퍼파라미터 최적화 시작")
 study = optuna.create_study(direction="maximize")
-study.optimize(objective, n_trials=50)
+study.optimize(objective, n_trials=100)
 print(">> [LightGBM] 최적화 완료")
 print("최적의 ROC-AUC:", study.best_value)
 print("최적의 파라미터:", study.best_params)

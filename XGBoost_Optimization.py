@@ -65,13 +65,14 @@ def objective(trial):
         "objective": "binary:logistic",
         "eval_metric": "auc",
         "booster": "gbtree",
-        "max_depth": trial.suggest_int("max_depth", 4, 10),
-        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
-        "n_estimators": trial.suggest_int("n_estimators", 200, 800, step=50),
-        "min_child_weight": trial.suggest_int("min_child_weight", 3, 10),
-        "subsample": trial.suggest_float("subsample", 0.7, 0.9),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.7, 0.9),
-        "scale_pos_weight": trial.suggest_float("scale_pos_weight", 0.5, 2.0, step=0.05),
+        "max_depth": trial.suggest_int("max_depth", 3, 15),
+        "learning_rate": trial.suggest_float("learning_rate", 0.001, 0.3, log=True),
+        "n_estimators": trial.suggest_int("n_estimators", 200, 1000, step=50),
+        "min_child_weight": trial.suggest_int("min_child_weight", 1, 10),
+        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
+        "colsample_bylevel": trial.suggest_float("colsample_bylevel", 0.6, 1.0),
+        "colsample_bynode": trial.suggest_float("colsample_bynode", 0.6, 1.0),
         "gamma": trial.suggest_float("gamma", 0.0, 5.0),
         "lambda": trial.suggest_float("lambda", 1e-8, 10.0, log=True),
         "alpha": trial.suggest_float("alpha", 1e-8, 10.0, log=True),
@@ -79,13 +80,24 @@ def objective(trial):
     }
     print(f"[Optuna] Trial {trial.number} 설정된 파라미터: {param}")
     
-    model = xgb.XGBClassifier(**param, use_label_encoder=False)
-    model.fit(X_train, y_train, eval_set=[(X_test, y_test)], verbose=False)
+    from sklearn.model_selection import StratifiedKFold
+    auc_scores = []
+    skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
     
-    y_prob = model.predict_proba(X_test)[:, 1]
-    auc = roc_auc_score(y_test, y_prob)
-    print(f"[Optuna] Trial {trial.number} 완료: ROC-AUC = {auc}\n")
-    return auc
+    for train_idx, val_idx in skf.split(X_train, y_train):
+        X_tr, X_val = X_train.iloc[train_idx], X_train.iloc[val_idx]
+        y_tr, y_val = y_train.iloc[train_idx], y_train.iloc[val_idx]
+        
+        # 수정 후: 튜닝된 n_estimators 값을 그대로 사용해 한 번에 학습
+        model = xgb.XGBClassifier(**param, use_label_encoder=False)
+        model.fit(X_tr, y_tr, verbose=False)
+        y_prob = model.predict_proba(X_val)[:, 1]
+        auc = roc_auc_score(y_val, y_prob)
+        auc_scores.append(auc)
+    
+    mean_auc = np.mean(auc_scores)
+    print(f"[Optuna] Trial {trial.number} 완료: 평균 ROC-AUC = {mean_auc:.4f}\n")
+    return mean_auc
 
 print("Step 2: Optuna를 통한 하이퍼파라미터 최적화 시작")
 study = optuna.create_study(direction="maximize")
