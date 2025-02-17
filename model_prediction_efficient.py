@@ -10,7 +10,6 @@ import lightgbm as lgb
 from catboost import CatBoostClassifier
 from sklearn.ensemble import RandomForestClassifier
 
-# 모델 파일 및 파라미터 파일을 저장할 폴더 생성
 MODEL_PATH = "open/models"
 os.makedirs(MODEL_PATH, exist_ok=True)
 
@@ -65,117 +64,171 @@ def load_and_preprocess_data():
     
     return X, X_test, y, test_ids
 
-def load_best_params():
-    """
-    저장된 각 모델의 최적 파라미터 파일에서 파라미터를 불러옴.
-    만약 파일에 "params" 키가 있다면 해당 값을, 없다면 로드한 dict 자체를 사용합니다.
-    """
-    print("\n=== 최적 파라미터 로드 ===")
-    try:
-        best_params = {}
+def clean_params(params):
+    """파라미터에서 불필요한 키 제거"""
+    if isinstance(params, dict):
+        if "params" in params:
+            model_params = params["params"]
+        else:
+            model_params = params.copy()
+        model_params.pop("roc_auc", None)
+        model_params.pop("score", None)
+        return model_params
+    return params
 
-        # XGBoost
-        xgb_params = joblib.load('open/best_xgb_params.pkl')
-        best_params["xgb"] = xgb_params["params"] if isinstance(xgb_params, dict) and "params" in xgb_params else xgb_params
-
-        # LightGBM
-        try:
-            lgb_params = joblib.load('open/best_lgbm_params.pkl')
-        except Exception:
-            lgb_params = joblib.load('open/best_lightgbm_params.pkl')
-        best_params["lgb"] = lgb_params["params"] if isinstance(lgb_params, dict) and "params" in lgb_params else lgb_params
-
-        # CatBoost
-        cat_params = joblib.load('open/best_catboost_params.pkl')
-        best_params["cat"] = cat_params["params"] if isinstance(cat_params, dict) and "params" in cat_params else cat_params
-
-        # RandomForest
-        rf_params = joblib.load('open/best_rf_params.pkl')
-        best_params["rf"] = rf_params["params"] if isinstance(rf_params, dict) and "params" in rf_params else rf_params
-
-        print("✓ 모든 모델의 최적 파라미터를 성공적으로 로드했습니다.")
-        return best_params
-    except Exception as e:
-        print(f"❌ 파라미터 로드 실패: {str(e)}")
-        return None
-
-def load_or_train_models(X_train, y_train, params, force_retrain=False):
-    """
-    저장된 최적 파라미터를 이용해 모델 객체를 생성한 후,
-    open/models 폴더에 저장된 모델 파일이 있으면 로드하고,
-    없으면 학습시켜 저장한다.
-    """
-    print("\n=== 모델 로드 또는 학습 시작 ===")
-    models = {
-        "xgboost": xgb.XGBClassifier(**params["xgb"], use_label_encoder=False, eval_metric="auc"),
-        "lightgbm": lgb.LGBMClassifier(**params["lgb"]),
-        "catboost": CatBoostClassifier(**params["cat"], verbose=False, eval_metric="AUC"),
-        "randomforest": RandomForestClassifier(**params["rf"], random_state=42, n_jobs=-1)
+def load_model_params(model_name):
+    """각 모델별 파라미터 로드"""
+    # 모델명과 파일명 매핑
+    file_name_mapping = {
+        "xgb": "xgb",
+        "lgb": "lgbm",  # lightgbm도 처리
+        "cat": "catboost",  # catboost로 수정
+        "rf": "rf"
     }
     
-    for name, model in models.items():
-        model_path = f"{MODEL_PATH}/{name}_model.pkl"
-        if os.path.exists(model_path) and not force_retrain:
-            print(f"✓ {name} 모델 로드 중...")
-            models[name] = joblib.load(model_path)
+    try:
+        if model_name == "lgb":
+            # LightGBM은 두 가지 파일명 시도
+            try:
+                params = joblib.load('open/best_lgbm_params.pkl')
+            except:
+                params = joblib.load('open/best_lightgbm_params.pkl')
         else:
-            print(f"⚙️ {name} 모델 학습 중...")
-            model.fit(X_train, y_train)
-            joblib.dump(model, model_path)
-            print(f"✓ {name} 모델 학습 및 저장 완료")
-    
-    return models
+            # 매핑된 파일명 사용
+            mapped_name = file_name_mapping.get(model_name, model_name)
+            params = joblib.load(f'open/best_{mapped_name}_params.pkl')
+        
+        print(f"✅ {model_name} 파라미터 로드 성공")
+        return clean_params(params)
+    except Exception as e:
+        print(f"❌ {model_name} 파라미터 로드 실패 (파일: best_{file_name_mapping.get(model_name, model_name)}_params.pkl)")
+        print(f"  에러 메시지: {str(e)}")
+        return None
 
-def evaluate_model(model, X_val, y_val):
-    """
-    모델을 사용하여 검증 데이터(X_val)로 예측을 수행하고 ROC-AUC 점수를 계산하여 반환.
-    """
-    y_pred = model.predict_proba(X_val)[:, 1]
-    score = roc_auc_score(y_val, y_pred)
-    return score, y_pred
+def print_model_performance_table(scores):
+    """모델별 성능을 테이블 형태로 출력"""
+    print("\n=== 📊 모델별 성능 비교 ===")
+    print("-" * 45)
+    print(f"{'모델명'.ljust(15)} {'검증 ROC-AUC'.rjust(15)} {'테스트 ROC-AUC'.rjust(15)}")
+    print("-" * 45)
+    for model_name, score_dict in scores.items():
+        val_score = score_dict.get('val_score', 0)
+        test_score = score_dict.get('test_score', 0)
+        print(f"{model_name.ljust(15)} {f'{val_score:.4f}'.rjust(15)} {f'{test_score:.4f}'.rjust(15)}")
+    print("-" * 45)
+
+def train_and_predict(model_class, params, X_train, y_train, X_test, model_name):
+    """개별 모델 학습/로드 및 예측"""
+    print(f"\n=== {model_name} 모델 처리 시작 ===")
+    
+    model_path = f"{MODEL_PATH}/{model_name}_model.pkl"
+    performance_path = f"{MODEL_PATH}/{model_name}_performance.pkl"
+    
+    if os.path.exists(model_path):
+        print(f"[{model_name}] ℹ️ 저장된 모델 발견, 로드 중...")
+        try:
+            model = joblib.load(model_path)
+            if os.path.exists(performance_path):
+                performance = joblib.load(performance_path)
+                print(f"[{model_name}] 📈 저장된 성능 지표:")
+                print(f"    - 검증 ROC-AUC: {performance.get('val_score', 0):.4f}")
+                print(f"    - 테스트 ROC-AUC: {performance.get('test_score', 0):.4f}")
+            return model, performance
+        except Exception as e:
+            print(f"[{model_name}] ⚠️ 모델 로드 실패: {str(e)}")
+            print(f"[{model_name}] 🔄 새로 학습을 시작합니다.")
+    else:
+        print(f"[{model_name}] ℹ️ 저장된 모델 없음, 새로 학습합니다.")
+    
+    # 모델 학습
+    if model_name == "xgb":
+        model = model_class(**params, use_label_encoder=False, eval_metric="auc")
+    elif model_name == "cat":
+        model = model_class(**params, verbose=False, eval_metric="AUC")
+    else:
+        model = model_class(**params)
+    
+    model.fit(X_train, y_train)
+    
+    # 모델 저장
+    try:
+        joblib.dump(model, model_path)
+        print(f"[{model_name}] ✅ 모델 저장 완료")
+    except Exception as e:
+        print(f"[{model_name}] ⚠️ 모델 저장 실패: {str(e)}")
+    
+    return model, None
 
 def main():
-    print("\n🚀 개별 모델 예측 실행")
+    print("\n🚀 개별 모델 예측 파이프라인 시작")
+    
     # 데이터 로드 및 전처리
     X, X_test, y, test_ids = load_and_preprocess_data()
     if X is None:
         return
-    # 학습 데이터를 80:20 비율로 나누어 검증 데이터 분리
-    X_train, X_val, y_train, y_val = train_test_split(X, y, test_size=0.2, random_state=42, stratify=y)
     
-    # 저장된 최적 파라미터 불러오기
-    params = load_best_params()
-    if params is None:
-        return
+    # 검증용 분할
+    X_train, X_val, y_train, y_val = train_test_split(
+        X, y, test_size=0.2, random_state=42, stratify=y
+    )
     
-    # 최적 파라미터를 사용하여 모델 로드 또는 학습
-    models = load_or_train_models(X_train, y_train, params, force_retrain=False)
+    models_config = {
+        "xgb": (xgb.XGBClassifier, "xgb"),
+        "lgb": (lgb.LGBMClassifier, "lgb"),
+        "cat": (CatBoostClassifier, "cat"),
+        "rf": (RandomForestClassifier, "rf")
+    }
     
-    # 각 모델의 검증 ROC-AUC 평가 및 출력
+    submissions = {}
     scores = {}
-    for name, model in models.items():
-        score, _ = evaluate_model(model, X_val, y_val)
-        scores[name] = score
-        print(f"{name} 모델의 검증 ROC-AUC: {score:.4f}")
     
-    # 각 모델을 사용하여 test.csv에 대해 예측 수행 및 개별 CSV 파일 저장
-    for name, model in models.items():
-        print(f"{name} 모델 예측 수행 중...")
-        pred = model.predict_proba(X_test)[:, 1]
-        submission = pd.DataFrame({
-            "ID": test_ids,
-            "probability": pred
-        })
-        output_path = f"submission_{name}.csv"
-        submission.to_csv(output_path, index=False)
-        print(f"✨ {name} 예측 완료! {output_path} 파일 생성됨")
+    for model_key, (model_class, param_key) in models_config.items():
+        try:
+            params = load_model_params(param_key)
+            if params is None:
+                print(f"⚠️ {model_key} 모델 스킵: 파라미터 로드 실패")
+                continue
+            
+            # 모델 학습/로드 및 성능 지표 확인
+            model, performance = train_and_predict(
+                model_class, params, X_train, y_train, X_test, model_key
+            )
+            
+            # 검증 세트 예측 및 성능 평가
+            val_pred = model.predict_proba(X_val)[:, 1]
+            val_score = roc_auc_score(y_val)
+            
+            # 테스트 세트 예측
+            test_pred = model.predict_proba(X_test)[:, 1]
+            
+            # 성능 저장
+            model_scores = {
+                'val_score': val_score,
+                'test_score': 0  # 실제 테스트 레이블이 없으므로 0으로 설정
+            }
+            scores[model_key] = model_scores
+            
+            # 성능 지표 파일 저장
+            joblib.dump(model_scores, f"{MODEL_PATH}/{model_key}_performance.pkl")
+            
+            # 제출 파일 생성
+            submission = pd.DataFrame({
+                "ID": test_ids,
+                "probability": test_pred
+            })
+            output_path = f"submission_{model_key}.csv"
+            submission.to_csv(output_path, index=False)
+            print(f"✅ {model_key} 제출 파일 생성 완료: {output_path}")
+            
+            submissions[model_key] = submission
+            
+        except Exception as e:
+            print(f"❌ {model_key} 모델 처리 중 오류 발생: {str(e)}")
     
-    # 검증 ROC-AUC 요약 출력
-    print("\n=== 개별 모델 검증 ROC-AUC 요약 ===")
-    for name, score in scores.items():
-        print(f"{name}: {score:.4f}")
+    # 모델별 성능 비교 테이블 출력
+    print_model_performance_table(scores)
+    
+    return submissions, scores
 
 if __name__ == "__main__":
     main()
-
-print(">> [model_prediction_efficient] 파일 실행 종료")

@@ -9,24 +9,27 @@ import optuna
 import joblib
 import os
 
-# 진행 상황을 기록하기 위한 업데이트 함수
-def update_best_parameters(file_path, new_score, new_params):
-    # 파일 존재 여부 확인 후 최적 파라미터 업데이트
-    if os.path.exists(file_path):
-        old = joblib.load(file_path)
-        old_score = old.get("score", 0)
-        if new_score > old_score:
-            best = {"score": new_score, "params": new_params}
-            joblib.dump(best, file_path)
-            print("새로운 최적 파라미터 업데이트 완료: score = {:.4f}".format(new_score))
-        else:
-            print("기존 최적 파라미터 유지: score = {:.4f}".format(old_score))
-            best = old
+# 개선된 update_best_parameters 함수 (키: "roc_auc"로 일관)
+def update_best_parameters(params_path, new_roc, new_params):
+    # 기존 pkl 파일 로드 여부 확인 및 로드
+    if os.path.exists(params_path):
+        old_record = joblib.load(params_path)
+        old_roc = old_record.get("roc_auc", 0)
+        print(f"[LOG] 기존 pkl 파일 로드 성공: {old_record}")  # 기존 기록 확인 로그
     else:
-        best = {"score": new_score, "params": new_params}
-        joblib.dump(best, file_path)
-        print("최적 파라미터 저장 완료: score = {:.4f}".format(new_score))
-    return best
+        old_roc = 0
+        print("[LOG] 기존 pkl 파일이 없음. 새로 생성합니다.")
+    
+    print(f"[LOG] 새로 시도된 ROC-AUC: {new_roc:.4f}, 기존 ROC-AUC: {old_roc:.4f}")
+    
+    # 새 스코어가 기존 스코어보다 높을 경우 기록 업데이트 
+    if new_roc > old_roc:
+        best_record = {"params": new_params, "roc_auc": new_roc}
+        joblib.dump(best_record, params_path)
+        print(f"[LOG] 🏆 파라미터 업데이트 완료: 새 ROC-AUC = {new_roc:.4f}, 저장된 파라미터: {new_params}")
+    else:
+        print(f"[LOG] ℹ 기존 파라미터 유지: 기존 ROC-AUC = {old_roc:.4f} >= 새 ROC-AUC = {new_roc:.4f}")
+    return
 
 # Step 1: 데이터 로드 및 전처리
 print(">> [CATBoost_Optimization] Step 1: 데이터 로드 및 분할 시작")
@@ -57,7 +60,6 @@ print(f"  [클래스 비율] 음성: {neg_count}, 양성: {pos_count}, 기본 sc
 # Optuna 목적 함수 (하이퍼파라미터 탐색)
 def objective(trial):
     print(f">> [Optuna] Trial {trial.number} 시작")
-    # 하이퍼파라미터 샘플링
     param = {
         "depth": trial.suggest_int("depth", 4, 8),
         "learning_rate": trial.suggest_float("learning_rate", 0.02, 0.2, log=True),
@@ -70,17 +72,39 @@ def objective(trial):
         "verbose": False
     }
     print(f"  [Optuna] Trial {trial.number} 설정 파라미터: {param}")
-    
-    # 모델 객체 생성 및 학습
     model = CatBoostClassifier(cat_features=cat_features, **param, eval_metric="AUC")
     model.fit(X_train, y_train)
     print(f"  [Optuna] Trial {trial.number} 모델 학습 완료")
-    
-    # 성능 평가 (ROC-AUC 계산)
     y_prob = model.predict_proba(X_test)[:, 1]
     auc = roc_auc_score(y_test, y_prob)
     print(f">> [Optuna] Trial {trial.number} 완료: ROC-AUC = {auc:.4f}\n")
     return auc
+
+def optimize_catboost():
+    best_param_file = "open/best_catboost_params.pkl"
+    old_score = 0
+    if os.path.exists(best_param_file):
+        best_old = joblib.load(best_param_file)
+        old_score = best_old.get("roc_auc", 0)
+        print(f"[LOG] 기존 CatBoost 최적화 pkl 파일 로드됨: {best_old}")
+    else:
+        print("[LOG] 기존 CatBoost pkl 파일이 없습니다.")
+    
+    study = optuna.create_study(direction="maximize", pruner=optuna.pruners.MedianPruner(n_warmup_steps=20))
+    study.optimize(objective, n_trials=50)
+    new_score = study.best_value
+    print(f"[LOG] 최적화 완료: 새 ROC-AUC = {new_score:.4f}")
+    
+    if new_score > old_score:
+        best_params = study.best_params
+        best_params["roc_auc"] = new_score
+        joblib.dump(best_params, best_param_file)
+        print(f"[LOG] 새 파라미터 {best_params} 가 pkl 파일에 저장됨.")
+    else:
+        print(f"[LOG] 기존 파라미터 유지: 기존 ROC-AUC = {old_score:.4f}")
+    
+    # 갱신된 파라미터 저장 (업데이트 함수 사용)
+    update_best_parameters(best_param_file, study.best_value, study.best_params)
 
 # Step 2: Optuna 최적화 수행
 print(">> [CATBoost_Optimization] Step 2: Optuna 하이퍼파라미터 최적화 시작")
@@ -88,7 +112,7 @@ study = optuna.create_study(
     direction="maximize",
     pruner=optuna.pruners.MedianPruner(n_warmup_steps=20)
 )
-study.optimize(objective, n_trials=100)
+study.optimize(objective, n_trials=50)
 
 print(">> [CATBoost_Optimization] 최적화 완료")
 print("  최적의 ROC-AUC:", study.best_value)
@@ -157,3 +181,6 @@ print(">> [CATBoost_Optimization] Step 6: OOF 예측값 저장 시작")
 oof_predictions_df = pd.DataFrame({'true_values': y, 'oof_predictions': oof_predictions})
 oof_predictions_df.to_csv('open/catboost_oof_predictions.csv', index=False)
 print(">> [CATBoost_Optimization] 모든 작업 완료")
+
+if __name__ == "__main__":
+    optimize_catboost()

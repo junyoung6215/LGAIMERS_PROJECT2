@@ -60,6 +60,7 @@ def objective(trial):
         "bagging_freq": trial.suggest_int("bagging_freq", 1, 7),
         "colsample_bytree": trial.suggest_float("colsample_bytree", 0.5, 1.0)
     }
+    
     # dart 전용 drop_rate 추가
     if boost_type == "dart":
         param["drop_rate"] = trial.suggest_float("drop_rate", 0.1, 0.5)
@@ -92,12 +93,35 @@ def objective(trial):
     print(f"[Optuna] Trial {trial.number} 완료: ROC-AUC = {auc}\n")
     return auc
 
+# LightGBM용 파라미터 업데이트 과정 상세 로그 출력
+def optimize_lightgbm():
+    best_param_file = "open/best_lightgbm_params.pkl"
+    old_score = 0
+    if os.path.exists(best_param_file):
+        best_old = joblib.load(best_param_file)
+        old_score = best_old.get("roc_auc", 0)
+        print(f"[LightGBM LOG] 기존 파라미터 로드 성공: {best_old}")
+    else:
+        print("[LightGBM LOG] 기존 파라미터 파일이 없음. 새 파일 생성 예정.")
+    
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=50)
+    new_score = study.best_value
+    print(f"[LightGBM LOG] 최적화 완료: 새 ROC-AUC = {new_score:.4f}")
+    
+    if new_score > old_score:
+        best_params = study.best_params
+        best_params["roc_auc"] = new_score
+        joblib.dump(best_params, best_param_file)
+        print(f"[LightGBM LOG] 기존 파일보다 나은 성능 ({old_score:.4f} -> {new_score:.4f})으로 최적 파라미터로 수정하였습니다: {best_params}")
+    else:
+        print(f"[LightGBM LOG] 기존 파라미터 유지: 기존 ROC-AUC = {old_score:.4f} >= 새 ROC-AUC = {new_score:.4f}")
+    
+    return study  # study 객체를 반환
+
 print("Step 2: Optuna를 통한 하이퍼파라미터 최적화 시작")
-study = optuna.create_study(direction="maximize")
-study.optimize(objective, n_trials=100)
+study = optimize_lightgbm()
 print(">> [LightGBM] 최적화 완료")
-print("최적의 ROC-AUC:", study.best_value)
-print("최적의 파라미터:", study.best_params)
 
 from sklearn.model_selection import StratifiedKFold
 import numpy as np

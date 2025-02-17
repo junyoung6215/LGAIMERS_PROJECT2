@@ -18,22 +18,30 @@ def load_best_params():
         best_params = {}
         # XGBoost
         xgb_params = joblib.load('open/best_xgb_params.pkl')
-        best_params["xgb"] = xgb_params["params"] if isinstance(xgb_params, dict) and "params" in xgb_params else xgb_params
+        xgb_dict = xgb_params["params"] if isinstance(xgb_params, dict) and "params" in xgb_params else xgb_params
+        xgb_dict.pop("roc_auc", None)  # "roc_auc" 키 제거
+        best_params["xgb"] = xgb_dict
 
         # LightGBM
         try:
             lgb_params = joblib.load('open/best_lgbm_params.pkl')
         except Exception:
             lgb_params = joblib.load('open/best_lightgbm_params.pkl')
-        best_params["lgb"] = lgb_params["params"] if isinstance(lgb_params, dict) and "params" in lgb_params else lgb_params
+        lgb_dict = lgb_params["params"] if isinstance(lgb_params, dict) and "params" in lgb_params else lgb_params
+        lgb_dict.pop("roc_auc", None)
+        best_params["lgb"] = lgb_dict
 
         # CatBoost
         cat_params = joblib.load('open/best_catboost_params.pkl')
-        best_params["cat"] = cat_params["params"] if isinstance(cat_params, dict) and "params" in cat_params else cat_params
+        cat_dict = cat_params["params"] if isinstance(cat_params, dict) and "params" in cat_params else cat_params
+        cat_dict.pop("roc_auc", None)
+        best_params["cat"] = cat_dict
 
         # RandomForest
         rf_params = joblib.load('open/best_rf_params.pkl')
-        best_params["rf"] = rf_params["params"] if isinstance(rf_params, dict) and "params" in rf_params else rf_params
+        rf_dict = rf_params["params"] if isinstance(rf_params, dict) and "params" in rf_params else rf_params
+        rf_dict.pop("roc_auc", None)
+        best_params["rf"] = rf_dict
 
         print("✓ 모든 모델의 최적 파라미터를 성공적으로 로드했습니다.")
         return best_params
@@ -55,9 +63,11 @@ def load_and_merge_params():
             lgb_params = joblib.load('open/best_lightgbm_params.pkl')
         params["lgb"] = lgb_params
 
-        # 키가 있으면 해당 값 사용, 없으면 원본 사용
+        # 각 모델 파라미터에서 메타정보(roc_auc) 제거
         for key in params:
-            params[key] = params[key]["params"] if isinstance(params[key], dict) and "params" in params[key] else params[key]
+            model_params = params[key]["params"] if isinstance(params[key], dict) and "params" in params[key] else params[key]
+            model_params.pop("roc_auc", None)
+            params[key] = model_params
 
         joblib.dump(params, 'open/best_params.pkl')
         print("✓ 모든 모델의 최적 파라미터를 성공적으로 로드하고 병합했습니다.")
@@ -142,7 +152,7 @@ def optimize_blend_ratios_kfold(models, X, y, n_splits=5):
     print("\n🔍 Optuna 최적화 시작")
     import optuna
     study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=30)
+    study.optimize(objective, n_trials=100)
     
     best_weights = {k: v/sum(study.best_params.values()) for k, v in study.best_params.items()}
     print("\n🏆 최종 최적 블렌딩 가중치:")
@@ -161,36 +171,140 @@ def weighted_blend_predict(models, x_test, weights):
     print(f"✅ 최종 예측값 샘플: {final_pred[:10]}")
     return final_pred
 
+def update_best_parameters(file_path, new_score, new_params, param_type="model"):
+    """
+    파라미터(모델 파라미터 또는 블렌딩 가중치)를 업데이트하는 통합 함수
+    Args:
+        file_path: 저장할 파일 경로
+        new_score: 새로운 ROC-AUC 점수
+        new_params: 새로운 파라미터 또는 가중치
+        param_type: "model" 또는 "blend"
+    """
+    print(f"\n>> [{param_type.upper()}] 파라미터 업데이트 검토")
+    if os.path.exists(file_path):
+        old_data = joblib.load(file_path)
+        old_score = old_data.get("roc_auc", 0)
+        print(f"  • 기존 ROC-AUC: {old_score:.4f}")
+        print(f"  • 새로운 ROC-AUC: {new_score:.4f}")
+        
+        if new_score > old_score:
+            best_data = {
+                "params" if param_type == "model" else "weights": new_params,
+                "roc_auc": new_score
+            }
+            joblib.dump(best_data, file_path)
+            print(f"✅ 성능 향상으로 인한 업데이트 완료 ({old_score:.4f} → {new_score:.4f})")
+            return best_data
+        else:
+            print(f"ℹ️ 기존 파라미터 유지 (새로운 성능이 더 낮거나 같음)")
+            return old_data
+    else:
+        best_data = {
+            "params" if param_type == "model" else "weights": new_params,
+            "roc_auc": new_score
+        }
+        joblib.dump(best_data, file_path)
+        print(f"✨ 새로운 파라미터 저장 완료 (ROC-AUC: {new_score:.4f})")
+        return best_data
+
+def load_blend_weights(weights_path):
+    """
+    블렌딩 가중치를 안전하게 로드하는 함수
+    실패하면 기본 가중치를 반환
+    """
+    try:
+        if os.path.exists(weights_path):
+            data = joblib.load(weights_path)
+            if isinstance(data, dict):
+                # "weights" 키가 있는 경우
+                if "weights" in data:
+                    return data["weights"], data.get("roc_auc", 0)
+                # 직접 가중치가 저장된 경우
+                if all(k in data for k in ["xgboost", "lightgbm", "catboost"]):
+                    return data, 0
+            print("⚠️ 저장된 가중치 파일의 형식이 올바르지 않음")
+        else:
+            print("⚠️ 저장된 가중치 파일이 없음")
+    except Exception as e:
+        print(f"⚠️ 가중치 로드 중 에러 발생: {str(e)}")
+    
+    # 기본 가중치 반환
+    default_weights = {
+        "xgboost": 0.34,
+        "lightgbm": 0.33,
+        "catboost": 0.33
+    }
+    print("ℹ️ 기본 가중치를 사용합니다:", default_weights)
+    return default_weights, 0
+
+def save_blend_weights(weights_path, weights, score):
+    """
+    블렌딩 가중치를 지정된 형식으로 저장
+    """
+    data = {
+        "weights": weights,
+        "roc_auc": score
+    }
+    joblib.dump(data, weights_path)
+    print(f"✅ 가중치 저장 완료 (ROC-AUC: {score:.4f})")
+
 def run_blending_pipeline(X_train, y_train, X_test, test_ids, force_retrain=False):
     print("\n=== 📋 블렌딩 파이프라인 시작 ===")
+    print(f"[CONFIG] force_retrain: {force_retrain}")
+    
+    # force_retrain 값 설명: True인 경우 기존 저장된 모델을 무시하고 재학습, False인 경우 저장된 모델이 있으면 로드합니다.
+    print(f"[DEBUG] force_retrain 값: {force_retrain} (True: 모델 재학습, False: 기존 저장 모델 사용)")
+    
+    # 데이터 분할: 전체 학습 데이터를 메인 학습셋과 검증셋으로 분할합니다.
     X_train_main, X_val, y_train_main, y_val = train_test_split(
         X_train, y_train, test_size=0.2, random_state=42, stratify=y_train
     )
+    print("[INFO] 데이터 분할 완료: 학습 메인셋과 검증셋 구성")
     
     best_params = load_and_merge_params()
     if best_params is None:
+        print("[ERROR] 최적 파라미터 로드 실패. 블렌딩 파이프라인 종료")
         return None, None, None
     
+    print("[INFO] 개별 모델 학습/로딩 시작")
     models = load_or_train_models(X_train_main, y_train_main, best_params, force_retrain)
+    print("[INFO] 개별 모델 학습/로딩 완료")
     
-    print("\n=== 개별 모델 성능 ===")
+    print("\n=== 개별 모델 성능 평가 시작 ===")
     scores = {}
     for name, model in models.items():
         pred = model.predict_proba(X_val)[:, 1]
         score = roc_auc_score(y_val, pred)
         scores[name] = score
-        print(f"{name} ROC-AUC: {score:.4f}")
+        print(f"[평가] {name} 모델 ROC-AUC: {score:.4f}")
     
     weights_path = f"{MODEL_PATH}/blend_weights.pkl"
-    best_weights = optimize_blend_ratios_kfold(models, X_train, y_train, n_splits=5)
-    joblib.dump(best_weights, weights_path)
+    if not force_retrain:
+        best_weights, old_score = load_blend_weights(weights_path)
+        if old_score > 0:
+            print(f"[INFO] 기존 가중치 로드됨 (ROC-AUC: {old_score:.4f})")
     
+    if force_retrain or old_score == 0:
+        print("[INFO] 새로운 블렌딩 가중치 최적화 시작")
+        best_weights = optimize_blend_ratios_kfold(models, X_train, y_train, n_splits=5)
+        # 검증 세트에서의 성능 평가
+        val_pred = weighted_blend_predict(models, X_val, best_weights)
+        new_score = roc_auc_score(y_val, val_pred)
+        
+        # 기존 점수보다 더 좋은 경우에만 업데이트
+        if new_score > old_score:
+            save_blend_weights(weights_path, best_weights, new_score)
+            print(f"✨ 성능 향상: {old_score:.4f} → {new_score:.4f}")
+        else:
+            print(f"ℹ️ 기존 가중치 유지 (기존: {old_score:.4f} >= 새로운: {new_score:.4f})")
+    
+    print("\n=== 검증 데이터에 대한 앙상블 예측 수행 ===")
     final_pred = weighted_blend_predict(models, X_val, best_weights)
     blend_roc_auc = roc_auc_score(y_val, final_pred)
     scores["ensemble_blend"] = blend_roc_auc
+    print(f"[평가] 앙상블 블렌딩 모델 ROC-AUC: {blend_roc_auc:.4f}")
     
-    print(f"\n=== 앙상블 블렌딩 모델 ROC-AUC: {blend_roc_auc:.4f} ===")
-    
+    print("\n=== 테스트 데이터에 대한 최종 예측 및 제출 파일 변환 ===")
     final_test_pred = weighted_blend_predict(models, X_test, best_weights)
     submission = pd.DataFrame({
         "ID": test_ids,
@@ -199,9 +313,11 @@ def run_blending_pipeline(X_train, y_train, X_test, test_ids, force_retrain=Fals
     
     submission.to_csv("blend_prediction.csv", index=False)
     if os.path.exists("blend_prediction.csv"):
-        print("✅ blend_prediction.csv 파일이 정상적으로 생성되었습니다.")
+        print(f"[SUCCESS] 'blend_prediction.csv' 파일이 정상적으로 생성되었습니다: {os.path.abspath('blend_prediction.csv')}")
     else:
-        print("❌ blend_prediction.csv 파일이 생성되지 않았습니다.")
+        print("[ERROR] 'blend_prediction.csv' 파일 생성 실패")
+        
+    print("=== 📋 블렌딩 파이프라인 종료 ===")
     return submission, scores, best_weights
 
 def load_and_preprocess_data():
@@ -259,8 +375,17 @@ def main():
     print("블렌딩 모델 실행")
     print("사용 모델: XGBoost(xgb), LightGBM(lgb), CatBoost(cat)")
     X_train, X_test, y_train, test_ids = load_and_preprocess_data()
+    
+    # force_retrain 옵션 처리 예시
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--force_retrain', action='store_true',
+                      help='Force retrain models and reoptimize weights')
+    args = parser.parse_args()
+    
     submission, scores, weights = run_blending_pipeline(
-        X_train, y_train, X_test, test_ids, force_retrain=False
+        X_train, y_train, X_test, test_ids, 
+        force_retrain=args.force_retrain
     )
     if submission is not None:
         print("\n=== 최종 성능 요약 ===")
@@ -278,26 +403,43 @@ print(">> [model_ensemble] 파일 실행 시작")
 
 import pandas as pd
 import numpy as np
+import os
+import joblib
 
 # Step 1: 개별 모델 예측 결과 파일 불러오기 (예시)
 print(">> [앙상블] 개별 모델 예측값 로드 시작")
-# 예시: 두 모델의 예측 결과 csv 파일 로드
-model1_preds = pd.read_csv("open/lightgbm_oof_predictions.csv")
-model2_preds = pd.read_csv("open/catboost_oof_predictions.csv")
+lightgbm_preds = pd.read_csv("open/lightgbm_oof_predictions.csv")
+catboost_preds = pd.read_csv("open/catboost_oof_predictions.csv")
+# 새로 추가: xgboost OOF 예측값 로드 (미리 생성하여 'open/xgboost_oof_predictions.csv'에 저장)
+xgboost_preds = pd.read_csv("open/xgboost_oof_predictions.csv")
 print("  [앙상블] 예측값 파일 로드 완료")
 
-# Step 2: 앙상블 (예: 단순 평균)
-print(">> [앙상블] 예측값 평균 앙상블 수행")
-ensemble_preds = (model1_preds['oof_predictions'] + model2_preds['oof_predictions']) / 2
+# 새로 추가: 저장된 블렌딩 가중치 로드 (없으면 단순 평균 처리)
+weights_path = "open/models/blend_weights.pkl"
+if os.path.exists(weights_path):
+    blend_weights = joblib.load(weights_path)
+    print("✓ 블렌딩 가중치 로드됨:", blend_weights)
+else:
+    print("❌ 블렌딩 가중치 파일 없음, 단순 평균 사용")
+    blend_weights = {"lightgbm": 0.33, "catboost": 0.33, "xgboost": 0.34}
+
+# Step 2: 가중치를 적용한 앙상블 예측 수행
+print(">> [앙상블] 가중치 적용 앙상블 수행")
+ensemble_preds = blend_weights.get("lightgbm", 0) * lightgbm_preds['oof_predictions'] \
+                + blend_weights.get("catboost", 0) * catboost_preds['oof_predictions'] \
+                + blend_weights.get("xgboost", 0) * xgboost_preds['oof_predictions']
 ensemble_df = pd.DataFrame({
-    'true_values': model1_preds['true_values'], 
+    'true_values': lightgbm_preds['true_values'],
     'ensemble_predictions': ensemble_preds
 })
-print("  [앙상블] 평균 앙상블 완료")
+print("  [앙상블] 최종 앙상블 완료")
 
 # Step 3: 앙상블 결과 저장
-output_path = "open/ensemble_predictions.csv"
-ensemble_df.to_csv(output_path, index=False)
-print(f">> [앙상블] 앙상블 결과 저장 완료: {output_path}")
-
+submission = pd.DataFrame({
+    "ID": test_ids,              # 테스트 ID (예: "TEST_00000", "TEST_00001", ...)
+    "probability": ensemble_preds
+})
+submission.to_csv("open/ensemble_predictions.csv", index=False)
+print(f">> [앙상블] 앙상블 결과 저장 완료: {os.path.abspath('open/ensemble_predictions.csv')}")
 print(">> [model_ensemble] 파일 실행 종료")
+

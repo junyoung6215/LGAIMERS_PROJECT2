@@ -8,22 +8,24 @@ import optuna
 import joblib
 import os
 
-def update_best_parameters(file_path, new_score, new_params):
-    if os.path.exists(file_path):
-        old = joblib.load(file_path)
-        old_score = old.get("score", 0)
-        if new_score > old_score:
-            best = {"score": new_score, "params": new_params}
-            joblib.dump(best, file_path)
-            print("새로운 최적 파라미터 업데이트 완료: score = {:.4f}".format(new_score))
-        else:
-            print("기존 최적 파라미터 유지: score = {:.4f}".format(old_score))
-            best = old
+print(">> [XGBoost_Optimization] 파일 실행 시작")
+
+# XGBoost용 파라미터 업데이트 함수: 기존 pkl 파일 로드, 비교, 업데이트 과정을 상세 로그로 출력
+def update_best_parameters(params_path, new_roc, new_params):
+    if os.path.exists(params_path):
+        old_record = joblib.load(params_path)
+        old_roc = old_record.get("roc_auc", 0)
+        print(f"[XGBoost LOG] 기존 파라미터 로드 성공: {old_record}")
     else:
-        best = {"score": new_score, "params": new_params}
-        joblib.dump(best, file_path)
-        print("최적 파라미터 저장 완료: score = {:.4f}".format(new_score))
-    return best
+        old_roc = 0
+        print("[XGBoost LOG] 기존 파라미터 파일이 없음. 새 파일 생성 예정.")
+    print(f"[XGBoost LOG] 새 ROC-AUC: {new_roc:.4f} vs 기존 ROC-AUC: {old_roc:.4f}")
+    if new_roc > old_roc:
+        best_record = {"params": new_params, "roc_auc": new_roc}
+        joblib.dump(best_record, params_path)
+        print(f"[XGBoost LOG] 🏆 파라미터 업데이트 완료: 새 ROC-AUC = {new_roc:.4f}")
+    else:
+        print(f"[XGBoost LOG] ℹ 업데이트 없이 기존 파라미터 유지: 기존 ROC-AUC = {old_roc:.4f}")
 
 # Step 1: 데이터 로드 및 분할 시작
 print("Step 1: 데이터 로드 및 분할 시작")
@@ -59,6 +61,7 @@ pos_count = (y_train == 1).sum()
 default_scale_pos_weight = neg_count / pos_count if pos_count > 0 else 1
 print(f"  [클래스 비율] 음성:{neg_count}, 양성:{pos_count}, 기본 scale_pos_weight: {default_scale_pos_weight:.2f}\n")
 
+# Optuna 목적 함수 - XGBoost 모델을 위한 하이퍼파라미터 탐색
 def objective(trial):
     print(f">> [XGBoost] Trial {trial.number} 시작")
     param = {
@@ -99,17 +102,31 @@ def objective(trial):
     print(f"[Optuna] Trial {trial.number} 완료: 평균 ROC-AUC = {mean_auc:.4f}\n")
     return mean_auc
 
-print("Step 2: Optuna를 통한 하이퍼파라미터 최적화 시작")
-study = optuna.create_study(direction="maximize")
-study.optimize(objective, n_trials=100)
-print(">> [XGBoost] 최적화 완료")
-print("최적의 ROC-AUC:", study.best_value)
-print("최적의 파라미터:", study.best_params)
+def optimize_xgb():
+    best_param_file = "open/best_xgb_params.pkl"
+    old_score = 0
+    if os.path.exists(best_param_file):
+        prev = joblib.load(best_param_file)
+        old_score = prev.get("roc_auc", 0)
+        print(f"[XGBoost LOG] 기존 XGBoost 파라미터 파일 로드됨: {prev}")
+    else:
+        print("[XGBoost LOG] 기존 XGBoost 파라미터 파일이 없습니다.")
+    
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=30)
+    new_score = study.best_value
+    print(f"[XGBoost LOG] 최적화 완료: 새 ROC-AUC = {new_score:.4f}")
+    if new_score > old_score:
+        best_params = study.best_params
+        best_params["roc_auc"] = new_score
+        joblib.dump(best_params, best_param_file)
+        print(f"[XGBoost LOG] 새 파라미터 저장 완료: {best_params}")
+    else:
+        print(f"[XGBoost LOG] 기존 파라미터 유지: 기존 ROC-AUC = {old_score:.4f}")
+    
+    # 최종적으로 update_best_parameters 함수를 호출하여 업데이트 진행
+    update_best_parameters(best_param_file, new_score, study.best_params)
 
-if not os.path.exists('open'):
-    os.makedirs('open')
-    print(">> [XGBoost] 'open' 디렉토리 생성됨")
-
-best_params_path = "open/best_xgb_params.pkl"
-update_best_parameters(best_params_path, study.best_value, study.best_params)
+if __name__ == "__main__":
+    optimize_xgb()
 print("Step 3: 최적 파라미터 저장 완료")
